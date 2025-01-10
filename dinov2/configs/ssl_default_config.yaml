@@ -116,3 +116,20 @@ crops:
   local_crops_size: 96
 evaluation:
   eval_period_iterations: 12500
+wandb:
+  project: "EgocentricVision"
+  entity: "aaubret"
+  name: null
+  group: null
+knn:
+  enabled: True
+  dataset: imagenet100
+  train_path: "/pfss/mlde/workspaces/mlde_wsp_PI_Roig/shared/datasets/ImageNet/h5"
+  val_path: "/pfss/mlde/workspaces/mlde_wsp_PI_Roig/shared/datasets/ImageNet/h5"
+  num_workers: 4
+  batch_size: 64
+  k: [ 10, 20, 50, 100 ]
+  T: 0.07
+  distance_fx: "cosine"
+  perform_every_n_batches: 0.05
+  verbose: True

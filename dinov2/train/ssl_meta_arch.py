@@ -312,7 +312,7 @@ class SSLMetaArch(nn.Module):
 
             if self.do_koleo:
                 koleo_loss = self.cfg.dino.koleo_loss_weight * sum(
-                    self.koleo_loss(p) for p in student_cls_tokens.chunk(2)
+                    self.koleo_loss(p, eps=1e-4) for p in student_cls_tokens.chunk(2)
                 )  # we don't apply koleo loss between cls tokens of a same image
                 loss_accumulator += koleo_loss
                 loss_dict["koleo_loss"] = (

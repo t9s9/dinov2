@@ -14,7 +14,7 @@ dependencies:
   - torchmetrics=0.10.3
   - fvcore
   - iopath
-  - xformers::xformers=0.0.18
+  - xformers::xformers=0.0.19
   - pip
   - pip:
     - git+https://github.com/facebookincubator/submitit

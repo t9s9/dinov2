@@ -4,7 +4,9 @@
 # found in the LICENSE file in the root directory of this source tree.
 
 import logging
+import random
 
+import numpy as np
 from torchvision import transforms
 
 from .transforms import (
@@ -12,18 +14,17 @@ from .transforms import (
     make_normalize_transform,
 )
 
-
 logger = logging.getLogger("dinov2")
 
 
 class DataAugmentationDINO(object):
     def __init__(
-        self,
-        global_crops_scale,
-        local_crops_scale,
-        local_crops_number,
-        global_crops_size=224,
-        local_crops_size=96,
+            self,
+            global_crops_scale,
+            local_crops_scale,
+            local_crops_number,
+            global_crops_size=224,
+            local_crops_size=96,
     ):
         self.global_crops_scale = global_crops_scale
         self.local_crops_scale = local_crops_scale
@@ -93,14 +94,17 @@ class DataAugmentationDINO(object):
         self.global_transfo2 = transforms.Compose([color_jittering, global_transfo2_extra, self.normalize])
         self.local_transfo = transforms.Compose([color_jittering, local_transfo_extra, self.normalize])
 
-    def __call__(self, image):
+    def __call__(self, image, image_2=None):
         output = {}
 
         # global crops:
         im1_base = self.geometric_augmentation_global(image)
         global_crop_1 = self.global_transfo1(im1_base)
 
-        im2_base = self.geometric_augmentation_global(image)
+        if image_2 is not None:
+            im2_base = self.geometric_augmentation_global(image_2)
+        else:
+            im2_base = self.geometric_augmentation_global(image)
         global_crop_2 = self.global_transfo2(im2_base)
 
         output["global_crops"] = [global_crop_1, global_crop_2]
@@ -109,9 +113,16 @@ class DataAugmentationDINO(object):
         output["global_crops_teacher"] = [global_crop_1, global_crop_2]
 
         # local crops:
-        local_crops = [
-            self.local_transfo(self.geometric_augmentation_local(image)) for _ in range(self.local_crops_number)
-        ]
+        if image_2 is not None:
+            local_crops = [
+                self.local_transfo(self.geometric_augmentation_local(random.choice([image, image_2]))) for _ in
+                range(self.local_crops_number)
+            ]
+        else:
+            local_crops = [
+                self.local_transfo(self.geometric_augmentation_local(image)) for _ in range(self.local_crops_number)
+            ]
+
         output["local_crops"] = local_crops
         output["offsets"] = ()
 

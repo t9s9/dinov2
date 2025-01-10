@@ -8,6 +8,8 @@ import logging
 import math
 import os
 from functools import partial
+import wandb
+from omegaconf import OmegaConf
 
 from fvcore.common.checkpoint import PeriodicCheckpointer
 import torch
@@ -19,9 +21,8 @@ from dinov2.fsdp import FSDPCheckpointer
 from dinov2.logging import MetricLogger
 from dinov2.utils.config import setup
 from dinov2.utils.utils import CosineScheduler
-
+from dinov2.eval.knn_callback import KNNCallback
 from dinov2.train.ssl_meta_arch import SSLMetaArch
-
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
 logger = logging.getLogger("dinov2")
@@ -58,34 +59,49 @@ For python-based LazyConfig, use "path.key=value".
     return parser
 
 
+def init_wandb(cfg):
+    if distributed.is_main_process():
+        import wandb
+
+        wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=cfg.wandb.name,
+            group=cfg.wandb.group,
+        )
+
+        wandb.config.update(OmegaConf.to_container(cfg))
+        logger.info("wandb initialized.")
+
+
 def build_optimizer(cfg, params_groups):
     return torch.optim.AdamW(params_groups, betas=(cfg.optim.adamw_beta1, cfg.optim.adamw_beta2))
 
 
 def build_schedulers(cfg):
-    OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
+    total_stepping_batches = cfg.optim.total_stepping_batches
     lr = dict(
         base_value=cfg.optim["lr"],
         final_value=cfg.optim["min_lr"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
-        warmup_iters=cfg.optim["warmup_epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=int(cfg.optim["epochs"] * total_stepping_batches),
+        warmup_iters=int(cfg.optim["warmup_epochs"] * total_stepping_batches),
         start_warmup_value=0,
     )
     wd = dict(
         base_value=cfg.optim["weight_decay"],
         final_value=cfg.optim["weight_decay_end"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=int(cfg.optim["epochs"] * total_stepping_batches),
     )
     momentum = dict(
         base_value=cfg.teacher["momentum_teacher"],
         final_value=cfg.teacher["final_momentum_teacher"],
-        total_iters=cfg.optim["epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=int(cfg.optim["epochs"] * total_stepping_batches),
     )
     teacher_temp = dict(
         base_value=cfg.teacher["teacher_temp"],
         final_value=cfg.teacher["teacher_temp"],
-        total_iters=cfg.teacher["warmup_teacher_temp_epochs"] * OFFICIAL_EPOCH_LENGTH,
-        warmup_iters=cfg.teacher["warmup_teacher_temp_epochs"] * OFFICIAL_EPOCH_LENGTH,
+        total_iters=int(cfg.teacher["warmup_teacher_temp_epochs"] * total_stepping_batches),
+        warmup_iters=int(cfg.teacher["warmup_teacher_temp_epochs"] * total_stepping_batches),
         start_warmup_value=cfg.teacher["warmup_teacher_temp"],
     )
 
@@ -96,7 +112,7 @@ def build_schedulers(cfg):
     last_layer_lr_schedule = CosineScheduler(**lr)
 
     last_layer_lr_schedule.schedule[
-        : cfg.optim["freeze_last_layer_epochs"] * OFFICIAL_EPOCH_LENGTH
+    : int(cfg.optim["freeze_last_layer_epochs"] * total_stepping_batches)
     ] = 0  # mimicking the original schedules
 
     logger.info("Schedulers ready.")
@@ -136,32 +152,6 @@ def do_train(cfg, model, resume=False):
     inputs_dtype = torch.half
     fp16_scaler = model.fp16_scaler  # for mixed precision training
 
-    # setup optimizer
-
-    optimizer = build_optimizer(cfg, model.get_params_groups())
-    (
-        lr_schedule,
-        wd_schedule,
-        momentum_schedule,
-        teacher_temp_schedule,
-        last_layer_lr_schedule,
-    ) = build_schedulers(cfg)
-
-    # checkpointer
-    checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
-
-    start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
-
-    OFFICIAL_EPOCH_LENGTH = cfg.train.OFFICIAL_EPOCH_LENGTH
-    max_iter = cfg.optim.epochs * OFFICIAL_EPOCH_LENGTH
-
-    periodic_checkpointer = PeriodicCheckpointer(
-        checkpointer,
-        period=3 * OFFICIAL_EPOCH_LENGTH,
-        max_iter=max_iter,
-        max_to_keep=3,
-    )
-
     # setup data preprocessing
 
     img_size = cfg.crops.global_crops_size
@@ -190,12 +180,49 @@ def do_train(cfg, model, resume=False):
     )
 
     # setup data loader
-
     dataset = make_dataset(
         dataset_str=cfg.train.dataset_path,
+        dataset_kwags=cfg.train.dataset_kwargs,
         transform=data_transform,
         target_transform=lambda _: (),
     )
+
+    cfg.optim.total_stepping_batches = cfg.optim.epochs * len(dataset) // (
+                cfg.train.batch_size_per_gpu * distributed.get_global_size())
+    max_iter = cfg.optim.total_stepping_batches
+    logger.info(f"Total stepping batches: {cfg.optim.total_stepping_batches}")
+
+    if cfg.knn.enabled:
+        knn = KNNCallback(cfg.knn)
+        cfg.knn.perform_every_n_batches = int(cfg.knn.perform_every_n_batches * (max_iter // cfg.optim.epochs))
+        logger.info(f"KNN enabled. Perform every {cfg.knn.perform_every_n_batches} batches.")
+        knn.setup()
+    else:
+        knn = None
+
+    # setup optimizer
+
+    optimizer = build_optimizer(cfg, model.get_params_groups())
+    (
+        lr_schedule,
+        wd_schedule,
+        momentum_schedule,
+        teacher_temp_schedule,
+        last_layer_lr_schedule,
+    ) = build_schedulers(cfg)
+
+    # checkpointer
+    checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
+
+    periodic_checkpointer = PeriodicCheckpointer(
+        checkpointer,
+        period=0.1 * max_iter // cfg.optim.epochs,
+        max_iter=max_iter,
+        max_to_keep=3,
+    )
+
+    start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
+
     # sampler_type = SamplerType.INFINITE
     sampler_type = SamplerType.SHARDED_INFINITE
     data_loader = make_data_loader(
@@ -203,15 +230,14 @@ def do_train(cfg, model, resume=False):
         batch_size=cfg.train.batch_size_per_gpu,
         num_workers=cfg.train.num_workers,
         shuffle=True,
-        seed=start_iter,  # TODO: Fix this -- cfg.train.seed
+        seed=cfg.train.seed,
         sampler_type=sampler_type,
-        sampler_advance=0,  # TODO(qas): fix this -- start_iter * cfg.train.batch_size_per_gpu,
+        sampler_advance=start_iter * cfg.train.batch_size_per_gpu,
         drop_last=True,
         collate_fn=collate_fn,
     )
 
     # training loop
-
     iteration = start_iter
 
     logger.info("Starting training from iteration {}".format(start_iter))
@@ -220,11 +246,11 @@ def do_train(cfg, model, resume=False):
     header = "Training"
 
     for data in metric_logger.log_every(
-        data_loader,
-        10,
-        header,
-        max_iter,
-        start_iter,
+            data_loader,
+            10,
+            header,
+            max_iter,
+            start_iter,
     ):
         current_batch_size = data["collated_global_crops"].shape[0] / 2
         if iteration > max_iter:
@@ -272,7 +298,7 @@ def do_train(cfg, model, resume=False):
 
         if math.isnan(sum(loss_dict_reduced.values())):
             logger.info("NaN detected")
-            raise AssertionError
+            raise AssertionError("NaN detected")
         losses_reduced = sum(loss for loss in loss_dict_reduced.values())
 
         metric_logger.update(lr=lr)
@@ -287,6 +313,14 @@ def do_train(cfg, model, resume=False):
         if cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0:
             do_test(cfg, model, f"training_{iteration}")
             torch.cuda.synchronize()
+
+        if knn is not None:
+            knn_res = knn.step(model.teacher['backbone'], iteration)
+            if knn_res is not None and distributed.is_main_process():
+                for k, value in knn_res.items():
+                    wandb.log({f'knn/k={k}_top1': value[0]}, step=iteration)
+                    wandb.log({f'knn/k={k}_top5': value[1]}, step=iteration)
+
         periodic_checkpointer.step(iteration)
 
         iteration = iteration + 1
@@ -303,14 +337,16 @@ def main(args):
     logger.info("Model:\n{}".format(model))
     if args.eval_only:
         iteration = (
-            FSDPCheckpointer(model, save_dir=cfg.train.output_dir)
-            .resume_or_load(cfg.MODEL.WEIGHTS, resume=not args.no_resume)
-            .get("iteration", -1)
-            + 1
+                FSDPCheckpointer(model, save_dir=cfg.train.output_dir)
+                .resume_or_load(cfg.MODEL.WEIGHTS, resume=not args.no_resume)
+                .get("iteration", -1)
+                + 1
         )
         return do_test(cfg, model, f"manual_{iteration}")
 
+    init_wandb(cfg)
     do_train(cfg, model, resume=not args.no_resume)
+    wandb.finish()
 
 
 if __name__ == "__main__":

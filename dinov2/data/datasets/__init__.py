@@ -5,3 +5,5 @@
 
 from .image_net import ImageNet
 from .image_net_22k import ImageNet22k
+from .ego4d import Ego4d
+from .custom_img_net import CustomImgNetDataset

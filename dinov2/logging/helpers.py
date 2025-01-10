@@ -8,7 +8,7 @@ import datetime
 import json
 import logging
 import time
-
+import wandb
 import torch
 
 import dinov2.distributed as distributed
@@ -37,6 +37,14 @@ class MetricLogger(object):
             return self.__dict__[attr]
         raise AttributeError("'{}' object has no attribute '{}'".format(type(self).__name__, attr))
 
+    def all_gather_meter(self, meter) -> float:
+        t = torch.tensor([meter.total, meter.count], dtype=torch.float64, device="cuda")
+        torch.distributed.barrier()
+        torch.distributed.all_reduce(t)
+        total, count = t.tolist()
+        global_avg = total / count
+        return global_avg
+
     def __str__(self):
         loss_str = []
         for name, meter in self.meters.items():
@@ -51,6 +59,15 @@ class MetricLogger(object):
         self.meters[name] = meter
 
     def dump_in_output_file(self, iteration, iter_time, data_time):
+        metrics = {}
+        for key, meter in self.meters.items():
+            gathered_value = self.all_gather_meter(meter)
+            metrics[key] = gathered_value
+
+        if distributed.is_main_process():
+            for key, metric in metrics.items():
+                wandb.log({key: metric}, step=iteration)
+
         if self.output_file is None or not distributed.is_main_process():
             return
         dict_to_dump = dict(

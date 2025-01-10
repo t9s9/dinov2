@@ -10,9 +10,8 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from torch.utils.data import Sampler
 
-from .datasets import ImageNet, ImageNet22k
+from .datasets import ImageNet, ImageNet22k, Ego4d, CustomImgNetDataset
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
-
 
 logger = logging.getLogger("dinov2")
 
@@ -65,10 +64,13 @@ def _parse_dataset_str(dataset_str: str):
 
 
 def make_dataset(
-    *,
-    dataset_str: str,
-    transform: Optional[Callable] = None,
-    target_transform: Optional[Callable] = None,
+        *,
+        dataset_str: str,
+        data_root: Optional[str] = None,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        split: Optional[str] = None,
+        dataset_kwags: Optional[dict] = None,
 ):
     """
     Creates a dataset with the specified parameters.
@@ -83,8 +85,17 @@ def make_dataset(
     """
     logger.info(f'using dataset: "{dataset_str}"')
 
-    class_, kwargs = _parse_dataset_str(dataset_str)
-    dataset = class_(transform=transform, target_transform=target_transform, **kwargs)
+    if dataset_str == "Ego4d":
+        class_ = Ego4d
+        kwargs = {'data_root': data_root, **dataset_kwags}
+    elif dataset_str.lower() == "imagenet100":
+        class_ = CustomImgNetDataset
+        kwargs = {'root': data_root, 'split': split, 'subset': 'imgnet100'}
+    else:
+        raise ValueError(f'Unsupported dataset "{dataset_str}"')
+
+    # class_, kwargs = _parse_dataset_str(dataset_str)
+    dataset = class_(transform=transform, **kwargs)
 
     logger.info(f"# of dataset samples: {len(dataset):,d}")
 
@@ -98,13 +109,13 @@ def make_dataset(
 
 
 def _make_sampler(
-    *,
-    dataset,
-    type: Optional[SamplerType] = None,
-    shuffle: bool = False,
-    seed: int = 0,
-    size: int = -1,
-    advance: int = 0,
+        *,
+        dataset,
+        type: Optional[SamplerType] = None,
+        shuffle: bool = False,
+        seed: int = 0,
+        size: int = -1,
+        advance: int = 0,
 ) -> Optional[Sampler]:
     sample_count = len(dataset)
 
@@ -164,18 +175,18 @@ T = TypeVar("T")
 
 
 def make_data_loader(
-    *,
-    dataset,
-    batch_size: int,
-    num_workers: int,
-    shuffle: bool = True,
-    seed: int = 0,
-    sampler_type: Optional[SamplerType] = SamplerType.INFINITE,
-    sampler_size: int = -1,
-    sampler_advance: int = 0,
-    drop_last: bool = True,
-    persistent_workers: bool = False,
-    collate_fn: Optional[Callable[[List[T]], Any]] = None,
+        *,
+        dataset,
+        batch_size: int,
+        num_workers: int,
+        shuffle: bool = True,
+        seed: int = 0,
+        sampler_type: Optional[SamplerType] = SamplerType.INFINITE,
+        sampler_size: int = -1,
+        sampler_advance: int = 0,
+        drop_last: bool = True,
+        persistent_workers: bool = False,
+        collate_fn: Optional[Callable[[List[T]], Any]] = None,
 ):
     """
     Creates a data loader with the specified parameters.

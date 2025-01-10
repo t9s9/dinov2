@@ -1,0 +1,45 @@
+wandb:
+  project: "EgocentricVision"
+  entity: "aaubret"
+  name: "dinov2_vit_gs336_t15"
+  group: "dinov2"
+train:
+  batch_size_per_gpu: 128
+  num_workers: 8
+  output_dir: "/pfss/mlde/workspaces/mlde_wsp_PI_Roig/schaumloeffel/logs/ego4d/"
+  dataset_path: "Ego4d"
+  dataset_kwargs:
+    data_root: "/pfss/mlde/workspaces/mlde_wsp_PI_Roig/shared/datasets/Ego4d/h5"
+    gaze_size: 336
+    time_window: 15
+    center_crop: False
+    resize_gs: False
+student:
+  arch: vit_base
+  patch_size: 16
+  drop_path_rate: 0.2
+teacher:
+  momentum_teacher: 0.994
+ibot:
+  separate_head: true
+optim:
+  epochs: 1
+  weight_decay_end: 0.2
+  base_lr: 7.5e-04  # learning rate for a batch size of 1024
+  warmup_epochs: 0.1
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
+crops:
+  global_crops_scale:
+    - 0.4
+    - 1.0
+  local_crops_number: 8
+  local_crops_scale:
+    - 0.05
+    - 0.4
+  global_crops_size: 224
+  local_crops_size: 96
+knn:
+  enabled: True
+  dataset: imagenet100
+  perform_every_n_batches: 0.025
