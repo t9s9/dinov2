@@ -6,6 +6,8 @@
 import math
 import logging
 import os
+import string
+import secrets
 
 from omegaconf import OmegaConf
 
@@ -14,8 +16,12 @@ from dinov2.logging import setup_logging
 from dinov2.utils import utils
 from dinov2.configs import dinov2_default_config
 
-
 logger = logging.getLogger("dinov2")
+
+
+def generate_id(length: int = 8) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def apply_scaling_rules_to_cfg(cfg):  # to fix
@@ -38,11 +44,15 @@ def write_config(cfg, output_dir, name="config.yaml"):
 
 
 def get_cfg_from_args(args):
-    args.output_dir = os.path.abspath(args.output_dir)
-    args.opts += [f"train.output_dir={args.output_dir}"]
     default_cfg = OmegaConf.create(dinov2_default_config)
     cfg = OmegaConf.load(args.config_file)
     cfg = OmegaConf.merge(default_cfg, cfg, OmegaConf.from_cli(args.opts))
+
+    args.output_dir = os.path.abspath(args.output_dir)
+    args.output_dir = os.path.join(args.output_dir, cfg.wandb.name)
+    args.opts += [f"train.output_dir={args.output_dir}"]
+    cfg.train.output_dir = args.output_dir
+
     return cfg
 
 
@@ -60,11 +70,14 @@ def default_setup(args):
     logger.info("\n".join("%s: %s" % (k, str(v)) for k, v in sorted(dict(vars(args)).items())))
 
 
+
+
 def setup(args):
     """
     Create configs and perform basic setups.
     """
     cfg = get_cfg_from_args(args)
+    print("Output dir: ", args.output_dir)
     os.makedirs(args.output_dir, exist_ok=True)
     default_setup(args)
     apply_scaling_rules_to_cfg(cfg)

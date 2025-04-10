@@ -8,21 +8,20 @@ import logging
 import math
 import os
 from functools import partial
+
+import torch
 import wandb
 from omegaconf import OmegaConf
 
-from fvcore.common.checkpoint import PeriodicCheckpointer
-import torch
-
+import dinov2.distributed as distributed
 from dinov2.data import SamplerType, make_data_loader, make_dataset
 from dinov2.data import collate_data_and_cast, DataAugmentationDINO, MaskingGenerator
-import dinov2.distributed as distributed
-from dinov2.fsdp import FSDPCheckpointer
+from dinov2.eval.knn_callback import KNNCallback
+from dinov2.fsdp import FSDPCheckpointer, FSDPCheckpointerMerge, PeriodicCheckpointer
 from dinov2.logging import MetricLogger
+from dinov2.train.ssl_meta_arch import SSLMetaArch
 from dinov2.utils.config import setup
 from dinov2.utils.utils import CosineScheduler
-from dinov2.eval.knn_callback import KNNCallback
-from dinov2.train.ssl_meta_arch import SSLMetaArch
 
 torch.backends.cuda.matmul.allow_tf32 = True  # PyTorch 1.12 sets this to False by default
 logger = logging.getLogger("dinov2")
@@ -59,11 +58,12 @@ For python-based LazyConfig, use "path.key=value".
     return parser
 
 
+
 def init_wandb(cfg):
     if distributed.is_main_process():
         import wandb
 
-        wandb.init(
+        run = wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=cfg.wandb.name,
@@ -72,6 +72,10 @@ def init_wandb(cfg):
 
         wandb.config.update(OmegaConf.to_container(cfg))
         logger.info("wandb initialized.")
+
+        return run.id
+
+
 
 
 def build_optimizer(cfg, params_groups):
@@ -212,13 +216,14 @@ def do_train(cfg, model, resume=False):
     ) = build_schedulers(cfg)
 
     # checkpointer
-    checkpointer = FSDPCheckpointer(model, cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
+    checkpointer = FSDPCheckpointerMerge(model, save_dir=cfg.train.output_dir, optimizer=optimizer, save_to_disk=True)
 
     periodic_checkpointer = PeriodicCheckpointer(
         checkpointer,
-        period=0.1 * max_iter // cfg.optim.epochs,
+        period=int(0.1 * max_iter),
         max_iter=max_iter,
         max_to_keep=3,
+        file_prefix='model'
     )
 
     start_iter = checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=resume).get("iteration", -1) + 1
@@ -304,6 +309,7 @@ def do_train(cfg, model, resume=False):
         metric_logger.update(lr=lr)
         metric_logger.update(wd=wd)
         metric_logger.update(mom=mom)
+        metric_logger.update(teacher_temp=teacher_temp)
         metric_logger.update(last_layer_lr=last_layer_lr)
         metric_logger.update(current_batch_size=current_batch_size)
         metric_logger.update(total_loss=losses_reduced, **loss_dict_reduced)
