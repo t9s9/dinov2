@@ -18,7 +18,7 @@ class Ego4d(Dataset):
     corrupted = [(24, 14), (60, 16), (61, 13), (64, 12), (65, 9), (40, 8)]
     readded = [71, 56, 67, 74]
 
-    def __init__(self, data_root, transform, gaze_size=224, time_window=15, center_crop=False, resize_gs=False,
+    def __init__(self, data_root, transform, gaze_size=224, time_window=15, center_crop=False, resize_gs=False,  foveation=None,
                  **kwargs):
         super().__init__()
         assert gaze_size in [112, 114, 160, 224, 313, 336, 440, 448, 540]
@@ -29,6 +29,7 @@ class Ego4d(Dataset):
         self.center_crop = center_crop
         self.gaze_size = gaze_size
         self.resize_gs = resize_gs
+        self.foveation = foveation
 
         self.hdf5_file = h5py.File(os.path.join(self.data_root, f"data_all95.h5"), "r")
         self.dataset = h5py.File(os.path.join(self.data_root, f"dataset_all95.h5"), "r")["data"]
@@ -56,6 +57,13 @@ class Ego4d(Dataset):
 
         if self.center_crop:
             img = torchvision.transforms.functional.center_crop(img, (self.gaze_size, self.gaze_size))
+        elif self.foveation and self.foveation.name == "cm_center":
+            imgtsr = torchvision.transforms.functional.to_tensor(img)
+            img = img_cortical_magnif_tsr(imgtsr, (270, 270), lambda img2, pnt: radial_quad_isotrop_gridfun(img2, pnt,
+                                                                                                            fov=self.foveation.fov,
+                                                                                                            K=self.foveation.K))
+            img = torchvision.transforms.functional.to_pil_image(img)
+
         elif gaze_size == 540:
             if self.resize_gs:
                 img = torchvision.transforms.functional.resize(img, 224, InterpolationMode.BICUBIC)

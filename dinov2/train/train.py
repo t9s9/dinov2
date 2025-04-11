@@ -67,7 +67,7 @@ def init_wandb(cfg):
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=cfg.wandb.name,
-            group=cfg.wandb.group,
+            group=cfg.wandb.group
         )
 
         wandb.config.update(OmegaConf.to_container(cfg))
